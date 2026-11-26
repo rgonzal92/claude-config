@@ -261,6 +261,35 @@ class TestProtectSecrets(unittest.TestCase):
                     self.assertEqual(rc, 0)
                     self.assertEqual(claude_decision(data), "deny")
 
+    def test_allows_commit_messages_that_mention_secret_files(self) -> None:
+        cmds = (
+            'git commit -m "docs: document config/.env"',
+            'git commit -am "docs: document config/.env"',
+            'git commit "--message=docs: document config/.env"',
+            "git commit -q -F - <<'EOF'\ndocs: setup\n\ncopy the template, then edit .env\nEOF",
+            "cd repo && git commit -F - <<EOF\ncat .env is blocked by the hook\nEOF\ngit log -1",
+        )
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", {"command": cmd})
+                self.assertEqual(rc, 0)
+                self.assertEqual(claude_decision(data), "allow")
+
+    def test_denies_secret_reads_around_commit_messages_and_heredocs(self) -> None:
+        cmds = (
+            "git commit -F .env",
+            'git commit -m "docs: note" && cat .env',
+            "git commit -F - <<'EOF'\ndocs: note\nEOF\ncat .env",
+            "git commit -F - <<'EOF' && cat .env\ndocs: note\nEOF",
+            "bash <<'EOF'\ncat .env\nEOF",
+            "cat <<'EOF' | sh\ncat .env\nEOF",
+        )
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", {"command": cmd})
+                self.assertEqual(rc, 0)
+                self.assertEqual(claude_decision(data), "deny")
+
     def test_pem_is_denied_only_when_it_may_hold_a_private_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cert = Path(tmp) / "ca.pem"

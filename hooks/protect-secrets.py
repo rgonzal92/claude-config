@@ -43,6 +43,12 @@ GIT_NAME_ONLY_SUBS = {"check-ignore", "ls-files"}
 GREP_BINS = {"grep", "egrep", "fgrep", "rg"}
 # `--regexp=PAT`, `--file=F`, `-ePAT`, `-fF`: the pattern is not the first positional argument.
 GREP_INLINE_PATTERN_RE = re.compile(r"--(regexp|file)=|-[^-]*[ef].")
+# A heredoc fed straight to `git commit` is message text. Only that case is dropped: a heredoc
+# given to a shell, or piped onward, is code and stays checked.
+COMMIT_HEREDOC_RE = re.compile(
+    r"(\bgit\b[^\n|;&]*\bcommit\b[^\n|;&]*<<-?\s*(['\"]?)(\w+)\2[^\n|]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)",
+    re.DOTALL,
+)
 HOME_PROTECTED_REL = (
     ".npmrc",
     ".aws/credentials",
@@ -130,12 +136,29 @@ def check_path(raw_path: str, cwd: str) -> str | None:
     return None
 
 
+def _without_commit_messages(args: list[str]) -> list[str]:
+    """Drop `git commit` message text (-m, -am, --message): prose, not paths."""
+    kept: list[str] = []
+    skip_next = False
+    for tok in args:
+        if skip_next:
+            skip_next = False
+        elif tok == "--message" or (tok.startswith("-") and not tok.startswith("--") and tok.endswith("m")):
+            skip_next = True
+        elif not tok.startswith("--message="):
+            kept.append(tok)
+    return kept
+
+
 def _readable_args(tokens: list[str], cwd: str) -> list[str]:
     """Arguments of one command that it could read as a file."""
     base = os.path.basename(tokens[0])
     args = tokens[1:]
-    if base in NAME_ONLY_BINS or git_subcommand(tokens)[0] in GIT_NAME_ONLY_SUBS:
+    git_sub = git_subcommand(tokens)[0]
+    if base in NAME_ONLY_BINS or git_sub in GIT_NAME_ONLY_SUBS:
         return []
+    if git_sub == "commit":
+        args = _without_commit_messages(args)
     positional = [t for t in args if not t.startswith("-")]
     if base in GREP_BINS:
         if positional and not any(GREP_INLINE_PATTERN_RE.match(t) for t in args):
@@ -154,6 +177,7 @@ def _readable_args(tokens: list[str], cwd: str) -> list[str]:
 
 def _candidate_tokens_from_shell(cmd: str, cwd: str) -> list[str]:
     candidates: list[str] = []
+    cmd = COMMIT_HEREDOC_RE.sub(r"\1", cmd)
     for seg in split_shell_segments(cmd):
         for tok in _readable_args(seg, cwd):
             cleaned = tok.lstrip("<>@")
