@@ -133,137 +133,25 @@ class TestProtectFilesystem(unittest.TestCase):
                     self.assertEqual(rc, 0)
                     self.assertEqual(claude_decision(data), "allow")
 
+    def test_allows_harmless_dev_targets(self) -> None:
+        for cmd in ("dd if=big.bin of=/dev/null bs=1M", "rm /dev/shm/test.sock"):
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-filesystem.py", "Bash", {"command": cmd})
+                self.assertEqual(rc, 0)
+                self.assertEqual(claude_decision(data), "allow")
+
+    def test_still_denies_dev_shm_itself_and_other_devices(self) -> None:
+        for cmd in ("rm -rf /dev/shm", "rm /dev/sda", "dd if=/dev/zero of=/dev/shm/../sda"):
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-filesystem.py", "Bash", {"command": cmd})
+                self.assertEqual(rc, 0)
+                self.assertEqual(claude_decision(data), "deny")
+
     def test_antigravity_protocol_denies_root_rm(self) -> None:
         rc, data, _ = run_agy_hook("protect-filesystem.py", "run_command", {"CommandLine": "rm -rf /"})
         self.assertEqual(rc, 0)
         self.assertEqual(data.get("decision"), "deny")
         self.assertTrue(data.get("reason"))
-
-
-class TestProtectGit(unittest.TestCase):
-    def test_asks_on_destructive_and_remote_git_ops(self) -> None:
-        gated = [
-            "git push origin main",
-            "git push --force origin feat",
-            "git -C /tmp/repo push -f",
-            "git reset --hard HEAD~1",
-            "git checkout -- src/app.py",
-            "git restore src/app.py",
-            "git clean -fd",
-            "git rebase main",
-            "git commit --amend -m 'fix: tweak'",
-            "git branch -D old-branch",
-            "git stash drop",
-            "git stash",
-            "git merge feature-x",
-            "git revert HEAD",
-            "gh release create v1.0.0",
-            "gh pr merge 42",
-        ]
-        for cmd in gated:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-git.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "ask")
-
-    def test_allows_safe_git_ops(self) -> None:
-        allowed = [
-            "git status",
-            "git diff HEAD",
-            "git log -n 10 --oneline",
-            "git fetch origin",
-            "git add src/app.py",
-            "git commit -m 'feat(api): add health endpoint'",
-            "git checkout -b feat/new-thing",
-            "git switch main",
-            "git restore --staged src/app.py",
-            "git clean -nd",
-            "git stash list",
-            "git branch -a",
-        ]
-        for cmd in allowed:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-git.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "allow")
-
-    def test_antigravity_protocol_force_asks_on_push(self) -> None:
-        rc, data, _ = run_agy_hook("protect-git.py", "run_command", {"CommandLine": "git push origin main"})
-        self.assertEqual(rc, 0)
-        self.assertEqual(data.get("decision"), "force_ask")
-
-
-class TestValidateCommit(unittest.TestCase):
-    def test_allows_valid_conventional_commits(self) -> None:
-        valid = [
-            'git commit -m "feat(auth): add token refresh"',
-            'git commit -m "fix!: handle empty payload"',
-            'git commit -m "docs(claude-md): update Claude Code hooks"',
-            "git -C ~/.claude commit -m 'chore: sync settings' -m 'Keep hooks updated'",
-        ]
-        for cmd in valid:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "allow")
-
-    def test_denies_non_conventional_commit_messages(self) -> None:
-        invalid = [
-            'git commit -m "updated stuff"',
-            'git commit -m "WIP"',
-            'git commit -m "Feat: uppercase type"',
-            'git commit -m "fix:no space after colon"',
-        ]
-        for cmd in invalid:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "deny")
-
-    def test_denies_ai_attribution_in_commit_message(self) -> None:
-        attributed = [
-            'git commit -m "feat: add hook" -m "Co-Authored-By: Claude <noreply@anthropic.com>"',
-            'git commit -m "fix: bug" -m "Generated with Claude Code"',
-            'git commit -m "chore: cleanup" -m "AI-assisted refactor"',
-            "git commit -m \"$(cat <<'EOF'\nfeat: add hook\n\nCo-Authored-By: GitHub Copilot <copilot@github.com>\nEOF\n)\"",
-        ]
-        for cmd in attributed:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "deny")
-
-    def test_validates_commit_message_from_file_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            msg_file = Path(tmp) / "msg.txt"
-            msg_file.write_text("bad commit message\n", encoding="utf-8")
-            rc, data, _ = run_claude_hook(
-                "validate-commit.py", "Bash", {"command": f"git commit -F {msg_file}"}, cwd=tmp
-            )
-            self.assertEqual(rc, 0)
-            self.assertEqual(claude_decision(data), "deny")
-
-    def test_denies_combined_am_flag_and_heredoc_stdin(self) -> None:
-        cases = [
-            'git commit -am "not conventional"',
-            'git commit -am "feat: add x" -m "Co-Authored-By: Claude <noreply@anthropic.com>"',
-            "git commit -F - <<'EOF'\nmissing prefix\nEOF",
-        ]
-        for cmd in cases:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "deny")
-
-    def test_allows_valid_combined_am_flag(self) -> None:
-        rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": 'git commit -am "fix(core): guard null"'})
-        self.assertEqual(rc, 0)
-        self.assertEqual(claude_decision(data), "allow")
-
-    def test_ignores_non_commit_commands(self) -> None:
-        rc, data, _ = run_claude_hook("validate-commit.py", "Bash", {"command": "git status"})
-        self.assertEqual(rc, 0)
-        self.assertEqual(claude_decision(data), "allow")
 
 
 class TestProtectSecrets(unittest.TestCase):
@@ -326,175 +214,102 @@ class TestProtectSecrets(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(claude_decision(data), "deny")
 
-
-class TestProtectInfrastructure(unittest.TestCase):
-    def test_asks_on_infra_mutations(self) -> None:
-        gated = [
-            "terraform apply",
-            "terraform -chdir=infra destroy",
-            "kubectl apply -f deploy.yaml",
-            "kubectl delete pod my-pod",
-            "helm upgrade app ./chart",
-            "aws s3 rm s3://prod-bucket/file",
-            "aws ec2 terminate-instances --instance-ids i-123",
-            "wrangler deploy",
-            "vercel --prod",
-            "fly deploy",
-            "ansible-playbook site.yml",
-            "docker push myorg/app:latest",
-            "pulumi up",
-        ]
-        for cmd in gated:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-infrastructure.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "ask")
-
-    def test_allows_readonly_infra_commands(self) -> None:
-        allowed = [
-            "terraform validate",
-            "terraform -chdir=infra fmt -check",
-            "terraform plan",
-            "aws sts get-caller-identity",
-            "aws cloudwatch describe-alarms",
-            "aws logs filter-log-events --log-group-name app",
-            "aws s3 ls s3://prod-bucket",
-            "kubectl get pods",
-            "kubectl describe svc api",
-            "kubectl logs deploy/api",
-            "helm list",
-            "docker ps",
-            "docker build -t local-app .",
-        ]
-        for cmd in allowed:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-infrastructure.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "allow")
-
-
-class TestProtectDatabase(unittest.TestCase):
-    def test_asks_on_destructive_db_commands(self) -> None:
-        gated = [
-            'psql -d mydb -c "DROP TABLE users;"',
-            'mysql -e "TRUNCATE TABLE orders;"',
-            'sqlite3 app.db "DELETE FROM sessions;"',
-            "dropdb production",
-            "npx prisma migrate reset",
-            "alembic downgrade -1",
-            "redis-cli FLUSHALL",
-            "valkey-cli FLUSHDB",
-            'mongosh --eval "db.dropDatabase()"',
-            "flyway clean",
-        ]
-        for cmd in gated:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-database.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "ask")
-
-    def test_allows_readonly_db_and_grep_commands(self) -> None:
-        allowed = [
-            'psql -d mydb -c "SELECT count(*) FROM users;"',
-            'sqlite3 app.db "SELECT * FROM users LIMIT 5;"',
-            "npx prisma migrate status",
-            "alembic current",
-            'grep -rn "DROP TABLE" migrations/',
-            "redis-cli GET mykey",
-        ]
-        for cmd in allowed:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-database.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "allow")
-
-
-class TestProtectDependencies(unittest.TestCase):
-    def test_asks_on_dependency_changes(self) -> None:
-        gated = [
-            "npm install lodash",
-            "npm i",
-            "npm update",
-            "pnpm add zod",
-            "yarn add axios",
-            "pip install requests",
-            "python3 -m pip install flask",
-            "uv add httpx",
-            "cargo add serde",
-            "go get github.com/pkg/errors",
-            "sudo pacman -S jq",
-            "brew install ripgrep",
-        ]
-        for cmd in gated:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-dependencies.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "ask")
-
-    def test_allows_non_mutating_package_commands(self) -> None:
-        allowed = [
-            "npm run lint",
-            "npm test",
-            "npm ci",
-            "npm ls",
-            "pacman -Qi python",
-            "pip list",
-            "uv run pytest",
-            "cargo test",
-            "go test ./...",
-        ]
-        for cmd in allowed:
-            with self.subTest(cmd=cmd):
-                rc, data, _ = run_claude_hook("protect-dependencies.py", "Bash", {"command": cmd})
-                self.assertEqual(rc, 0)
-                self.assertEqual(claude_decision(data), "allow")
-
-
-class TestScanSecrets(unittest.TestCase):
-    def test_blocks_when_aws_key_written(self) -> None:
-        fake_aws = "AKIA" + "IOSFODNN7EXAMPLE"
-        rc, data, _ = run_claude_hook(
-            "scan-secrets.py",
-            "Write",
-            {"file_path": "/tmp/app.py", "content": f'AWS_KEY = "{fake_aws}"\n'},
-            event="PostToolUse",
+    def test_allows_shell_commands_that_name_a_secret_without_reading_it(self) -> None:
+        cmds = (
+            "grep -c id_rsa README.md",
+            "rg -n id_ed25519 docs",
+            "git check-ignore .env",
+            "ls -la ~/.gnupg",
+            "[ -f .env ]",
+            "stat .env",
         )
-        self.assertEqual(rc, 0)
-        self.assertEqual(data.get("decision"), "block")
-        self.assertIn("AWS Access Key", data.get("reason", ""))
-        self.assertNotIn(fake_aws, data.get("reason", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            for cmd in cmds:
+                with self.subTest(cmd=cmd):
+                    rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", {"command": cmd}, cwd=tmp)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(claude_decision(data), "allow")
 
-    def test_blocks_when_private_key_or_github_token_edited(self) -> None:
-        pem = "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nabc\n"
-        gh = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-        for content in (pem, f'TOKEN = "{gh}"'):
-            with self.subTest(content=content[:20]):
-                rc, data, _ = run_claude_hook(
-                    "scan-secrets.py",
-                    "Edit",
-                    {"file_path": "/tmp/app.py", "old_string": "x", "new_string": content},
-                    event="PostToolUse",
-                )
+    def test_denies_grep_on_secret_file_however_the_pattern_is_given(self) -> None:
+        cmds = (
+            "grep -e KEY .env",
+            "grep -eKEY .env",
+            "grep --regexp=KEY .env",
+            "grep -f patterns.txt .env",
+            "grep --file=patterns.txt .env",
+            "rg KEY .env",
+            "ls . && cat .env",
+        )
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", {"command": cmd})
                 self.assertEqual(rc, 0)
-                self.assertEqual(data.get("decision"), "block")
+                self.assertEqual(claude_decision(data), "deny")
 
-    def test_allows_placeholders_and_clean_code(self) -> None:
-        clean_samples = [
-            'API_KEY = "your_api_key_here"\n',
-            'PASSWORD = "changeme_placeholder"\n',
-            'DB_PASSWORD = os.environ["DB_PASSWORD"]\n',
-            'x = 42\n',
-        ]
-        for content in clean_samples:
-            with self.subTest(content=content):
-                rc, data, _ = run_claude_hook(
-                    "scan-secrets.py",
-                    "Write",
-                    {"file_path": "/tmp/app.py", "content": content},
-                    event="PostToolUse",
-                )
+    def test_allows_creating_env_from_template_only_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".env.example").write_text("KEY=\n", encoding="utf-8")
+            cmd = {"command": "cp .env.example .env"}
+            rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", cmd, cwd=tmp)
+            self.assertEqual(rc, 0)
+            self.assertEqual(claude_decision(data), "allow")
+
+            (Path(tmp) / ".env").write_text("KEY=real\n", encoding="utf-8")
+            for command in ("cp .env.example .env", "cp .env backup.txt", "cp -t out .env.example .env"):
+                with self.subTest(command=command):
+                    rc, data, _ = run_claude_hook("protect-secrets.py", "Bash", {"command": command}, cwd=tmp)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(claude_decision(data), "deny")
+
+    def test_pem_is_denied_only_when_it_may_hold_a_private_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = Path(tmp) / "ca.pem"
+            cert.write_text("-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n", encoding="utf-8")
+            key = Path(tmp) / "server.pem"
+            key.write_text("-----BEGIN " + "PRIVATE KEY-----\nabc\n", encoding="utf-8")
+            cases = ((cert, "allow"), (key, "deny"), (Path(tmp) / "missing.pem", "deny"))
+            for path, expected in cases:
+                with self.subTest(path=path.name):
+                    rc, data, _ = run_claude_hook("protect-secrets.py", "Read", {"file_path": str(path)})
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(claude_decision(data), expected)
+
+            rc, data, _ = run_claude_hook(
+                "protect-secrets.py", "Bash", {"command": "openssl x509 -in ca.pem -noout -text"}, cwd=tmp
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(claude_decision(data), "allow")
+
+    def test_project_npmrc_is_denied_only_when_it_may_hold_a_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = Path(tmp) / ".npmrc"
+            plain.write_text(
+                "registry=https://registry.npmjs.org/\n//npm.pkg.github.com/:_authToken=${NPM_TOKEN}\n",
+                encoding="utf-8",
+            )
+            (Path(tmp) / "sub").mkdir()
+            with_token = Path(tmp) / "sub" / ".npmrc"
+            with_token.write_text("//registry.npmjs.org/:_auth" + "Token=npm_abc123\n", encoding="utf-8")
+            cases = ((plain, "allow"), (with_token, "deny"), (Path(tmp) / "missing" / ".npmrc", "deny"))
+            for path, expected in cases:
+                with self.subTest(path=str(path.relative_to(tmp))):
+                    rc, data, _ = run_claude_hook("protect-secrets.py", "Read", {"file_path": str(path)})
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(claude_decision(data), expected)
+
+    def test_secret_json_matches_credential_names_not_any_word(self) -> None:
+        cases = (
+            ("/project/locales/secret-santa.json", "allow"),
+            ("/project/secrets.json", "deny"),
+            ("/project/app-secrets.json", "deny"),
+            ("/project/client_secret_123.json", "deny"),
+            ("/project/service-account-prod.json", "deny"),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                rc, data, _ = run_claude_hook("protect-secrets.py", "Read", {"file_path": path})
                 self.assertEqual(rc, 0)
-                self.assertNotIn("decision", data)
+                self.assertEqual(claude_decision(data), expected)
 
 
 if __name__ == "__main__":

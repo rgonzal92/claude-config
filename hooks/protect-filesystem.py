@@ -11,6 +11,7 @@ from _hook_common import emit_pre, get_command, read_event, split_shell_segments
 
 DELETE_BINS = {"rm", "rmdir", "unlink", "shred"}
 DISK_WIPE_BINS = {"mkfs", "wipefs", "fdisk", "parted", "sfdisk"}
+DD_SAFE_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 CRITICAL_PREFIXES = (
     "/bin",
     "/boot",
@@ -59,6 +60,8 @@ def _is_protected_resolved(resolved: str, home_str: str) -> bool:
     norm = resolved.rstrip("/") or "/"
     if norm in PROTECTED_EXACT or norm == home_str:
         return True
+    if norm.startswith("/dev/shm/"):  # world-writable tmpfs, like /tmp
+        return False
     for prefix in CRITICAL_PREFIXES:
         if norm == prefix or norm.startswith(prefix + "/"):
             return True
@@ -139,7 +142,7 @@ def _check_segment(tokens: list[str], cwd: str) -> tuple[str, str] | None:
 
     if base == "dd":
         for tok in tokens[1:]:
-            if tok.startswith("of=/dev/"):
+            if tok.startswith("of=/dev/") and tok[3:] not in DD_SAFE_SINKS:
                 return ("deny", f"Blocked raw device write via dd: {tok}")
 
     if base == "find":

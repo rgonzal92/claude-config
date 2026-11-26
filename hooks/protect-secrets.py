@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from _hook_common import emit_pre, get_command, get_file_paths, read_event, split_shell_segments
+from _hook_common import emit_pre, get_command, get_file_paths, git_subcommand, read_event, split_shell_segments
 
 SAFE_ENV_NAMES = {
     ".env.example",
@@ -18,7 +18,6 @@ SAFE_ENV_NAMES = {
 }
 PROTECTED_BASENAMES = {
     ".netrc",
-    ".npmrc",
     ".pypirc",
     ".credentials.json",
     "credentials.json",
@@ -32,8 +31,20 @@ PROTECTED_BASENAMES = {
     "id_dsa",
 }
 PROTECTED_EXTS = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"}
-SECRET_JSON_RE = re.compile(r"^(service[-_]?account.*|.*secret.*)\.json$", re.IGNORECASE)
+SECRET_JSON_RE = re.compile(
+    r"^(service[-_]?account.*|client[-_]?secret.*|(.*[-_.])?secrets?)\.json$", re.IGNORECASE
+)
+PRIVATE_KEY_RE = re.compile(rb"PRIVATE KEY")
+# A credential line whose value is written out rather than read from `${ENV_VAR}`.
+NPMRC_CREDENTIAL_RE = re.compile(rb"(?m)^[^#;\n]*(_auth|_authToken|_password)\s*=\s*(?!\$\{)\S")
+MAX_INSPECT_BYTES = 1024 * 1024
+NAME_ONLY_BINS = {"ls", "stat", "test", "["}  # report names and metadata, never contents
+GIT_NAME_ONLY_SUBS = {"check-ignore", "ls-files"}
+GREP_BINS = {"grep", "egrep", "fgrep", "rg"}
+# `--regexp=PAT`, `--file=F`, `-ePAT`, `-fF`: the pattern is not the first positional argument.
+GREP_INLINE_PATTERN_RE = re.compile(r"--(regexp|file)=|-[^-]*[ef].")
 HOME_PROTECTED_REL = (
+    ".npmrc",
     ".aws/credentials",
     ".kube/config",
     ".docker/config.json",
@@ -44,6 +55,17 @@ HOME_PROTECTED_REL = (
     ".terraform.d/credentials.tfrc.json",
 )
 HOME_PROTECTED_DIRS = (".gnupg",)
+
+
+def _may_contain(path: str, pattern: re.Pattern[bytes]) -> bool:
+    """True when the file matches, or cannot be inspected (fail closed)."""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > MAX_INSPECT_BYTES:
+            return True
+        with open(path, "rb") as f:
+            return bool(pattern.search(f.read()))
+    except OSError:
+        return True
 
 
 def _check_single_path(path_str: str, home_str: str) -> str | None:
@@ -60,9 +82,15 @@ def _check_single_path(path_str: str, home_str: str) -> str | None:
     if lower_base in PROTECTED_BASENAMES:
         return f"Protected credential/secret file: {base}"
 
+    # A project .npmrc usually holds registry settings only; ~/.npmrc is always protected below.
+    if lower_base == ".npmrc" and _may_contain(norm, NPMRC_CREDENTIAL_RE):
+        return f"Protected credential/secret file: {base}"
+
     _, ext = os.path.splitext(lower_base)
     if ext in PROTECTED_EXTS and not lower_base.startswith("."):
-        return f"Protected key/certificate file: {base}"
+        # .pem is also the usual extension for public certificates.
+        if ext != ".pem" or _may_contain(norm, PRIVATE_KEY_RE):
+            return f"Protected key/certificate file: {base}"
 
     if SECRET_JSON_RE.match(base):
         return f"Protected secret JSON file: {base}"
@@ -102,10 +130,32 @@ def check_path(raw_path: str, cwd: str) -> str | None:
     return None
 
 
-def _candidate_tokens_from_shell(cmd: str) -> list[str]:
+def _readable_args(tokens: list[str], cwd: str) -> list[str]:
+    """Arguments of one command that it could read as a file."""
+    base = os.path.basename(tokens[0])
+    args = tokens[1:]
+    if base in NAME_ONLY_BINS or git_subcommand(tokens)[0] in GIT_NAME_ONLY_SUBS:
+        return []
+    positional = [t for t in args if not t.startswith("-")]
+    if base in GREP_BINS:
+        if positional and not any(GREP_INLINE_PATTERN_RE.match(t) for t in args):
+            args.remove(positional[0])  # the search pattern
+    elif base == "cp" and len(positional) == 2:
+        source, dest = positional
+        # shortcut: the destination is resolved against the hook cwd, so a preceding `cd` can hide
+        # an existing .env from this check; track `cd` if that ever overwrites one.
+        creates_from_template = os.path.basename(source).lower() in SAFE_ENV_NAMES and not os.path.lexists(
+            os.path.join(cwd, os.path.expanduser(dest))
+        )
+        if creates_from_template:
+            args.remove(dest)
+    return args
+
+
+def _candidate_tokens_from_shell(cmd: str, cwd: str) -> list[str]:
     candidates: list[str] = []
     for seg in split_shell_segments(cmd):
-        for tok in seg[1:]:
+        for tok in _readable_args(seg, cwd):
             cleaned = tok.lstrip("<>@")
             if not cleaned:
                 continue
@@ -131,7 +181,7 @@ def main() -> None:
 
     cmd = get_command(event)
     if cmd:
-        for tok in _candidate_tokens_from_shell(cmd):
+        for tok in _candidate_tokens_from_shell(cmd, event.cwd):
             reason = check_path(tok, event.cwd)
             if reason:
                 emit_pre(event.agent, "deny", f"Blocked shell access to sensitive file ({reason}).")

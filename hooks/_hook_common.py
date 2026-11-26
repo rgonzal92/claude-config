@@ -116,29 +116,6 @@ def emit_pre(agent: str, decision: str, reason: str = "") -> None:
     )
 
 
-def emit_post_block(agent: str, reason: str) -> None:
-    if agent == "antigravity":
-        print("{}")
-        return
-    print(
-        json.dumps(
-            {
-                "decision": "block",
-                "reason": reason,
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": reason,
-                },
-            }
-        )
-    )
-
-
-def emit_post_allow(agent: str) -> None:
-    if agent == "antigravity":
-        print("{}")
-
-
 def _split_raw_segments(command: str) -> list[str]:
     """Split a shell command on unquoted control operators (&&, ||, ;, |, newlines)."""
     segments: list[str] = []
