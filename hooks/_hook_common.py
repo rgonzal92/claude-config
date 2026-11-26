@@ -116,6 +116,19 @@ def emit_pre(agent: str, decision: str, reason: str = "") -> None:
     )
 
 
+# A heredoc fed straight to `git commit` is message text. Only that case is dropped: a heredoc
+# given to a shell, or piped onward, is code and stays checked.
+COMMIT_HEREDOC_RE = re.compile(
+    r"(\bgit\b[^\n|;&]*\bcommit\b[^\n|;&]*<<-?\s*(['\"]?)(\w+)\2[^\n|]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)",
+    re.DOTALL,
+)
+
+
+def strip_commit_heredocs(command: str) -> str:
+    """Remove the body of heredocs that only supply a `git commit` message."""
+    return COMMIT_HEREDOC_RE.sub(r"\1", command)
+
+
 def _split_raw_segments(command: str) -> list[str]:
     """Split a shell command on unquoted control operators (&&, ||, ;, |, newlines)."""
     segments: list[str] = []

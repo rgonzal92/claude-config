@@ -147,6 +147,25 @@ class TestProtectFilesystem(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertEqual(claude_decision(data), "deny")
 
+    def test_allows_commit_message_heredoc_that_mentions_a_deletion(self) -> None:
+        cmd = "git commit -q -F - <<'EOF'\nfix: guard root\n\nrm -rf / is now denied\nEOF"
+        rc, data, _ = run_claude_hook("protect-filesystem.py", "Bash", {"command": cmd})
+        self.assertEqual(rc, 0)
+        self.assertEqual(claude_decision(data), "allow")
+
+    def test_denies_deletions_in_code_heredocs_and_after_a_commit_heredoc(self) -> None:
+        cmds = (
+            "bash <<'EOF'\nrm -rf /\nEOF",
+            "cat <<'EOF' | sh\nrm -rf /\nEOF",
+            "git commit -F - <<'EOF'\nfix: note\nEOF\nrm -rf /",
+            "git commit -F - <<'EOF' && rm -rf /\nfix: note\nEOF",
+        )
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                rc, data, _ = run_claude_hook("protect-filesystem.py", "Bash", {"command": cmd})
+                self.assertEqual(rc, 0)
+                self.assertEqual(claude_decision(data), "deny")
+
     def test_antigravity_protocol_denies_root_rm(self) -> None:
         rc, data, _ = run_agy_hook("protect-filesystem.py", "run_command", {"CommandLine": "rm -rf /"})
         self.assertEqual(rc, 0)

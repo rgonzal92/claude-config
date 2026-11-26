@@ -7,7 +7,15 @@ import os
 import re
 from pathlib import Path
 
-from _hook_common import emit_pre, get_command, get_file_paths, git_subcommand, read_event, split_shell_segments
+from _hook_common import (
+    emit_pre,
+    get_command,
+    get_file_paths,
+    git_subcommand,
+    read_event,
+    split_shell_segments,
+    strip_commit_heredocs,
+)
 
 SAFE_ENV_NAMES = {
     ".env.example",
@@ -43,12 +51,6 @@ GIT_NAME_ONLY_SUBS = {"check-ignore", "ls-files"}
 GREP_BINS = {"grep", "egrep", "fgrep", "rg"}
 # `--regexp=PAT`, `--file=F`, `-ePAT`, `-fF`: the pattern is not the first positional argument.
 GREP_INLINE_PATTERN_RE = re.compile(r"--(regexp|file)=|-[^-]*[ef].")
-# A heredoc fed straight to `git commit` is message text. Only that case is dropped: a heredoc
-# given to a shell, or piped onward, is code and stays checked.
-COMMIT_HEREDOC_RE = re.compile(
-    r"(\bgit\b[^\n|;&]*\bcommit\b[^\n|;&]*<<-?\s*(['\"]?)(\w+)\2[^\n|]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)",
-    re.DOTALL,
-)
 HOME_PROTECTED_REL = (
     ".npmrc",
     ".aws/credentials",
@@ -177,8 +179,7 @@ def _readable_args(tokens: list[str], cwd: str) -> list[str]:
 
 def _candidate_tokens_from_shell(cmd: str, cwd: str) -> list[str]:
     candidates: list[str] = []
-    cmd = COMMIT_HEREDOC_RE.sub(r"\1", cmd)
-    for seg in split_shell_segments(cmd):
+    for seg in split_shell_segments(strip_commit_heredocs(cmd)):
         for tok in _readable_args(seg, cwd):
             cleaned = tok.lstrip("<>@")
             if not cleaned:

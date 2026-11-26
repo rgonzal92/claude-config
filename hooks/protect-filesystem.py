@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from _hook_common import emit_pre, get_command, read_event, split_shell_segments
+from _hook_common import emit_pre, get_command, read_event, split_shell_segments, strip_commit_heredocs
 
 DELETE_BINS = {"rm", "rmdir", "unlink", "shred"}
 DISK_WIPE_BINS = {"mkfs", "wipefs", "fdisk", "parted", "sfdisk"}
@@ -179,7 +179,7 @@ def main() -> None:
         return
 
     ask_result: tuple[str, str] | None = None
-    for seg in split_shell_segments(cmd):
+    for seg in split_shell_segments(strip_commit_heredocs(cmd)):
         verdict = _check_segment(seg, event.cwd)
         if verdict is None:
             continue
